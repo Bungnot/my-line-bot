@@ -1,0 +1,6 @@
+Flask
+requests
+regex
+line-bot-sdk
+easy-slipcheck
+gunicorn
