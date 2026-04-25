@@ -60,7 +60,7 @@ TZ_BKK = timezone(timedelta(hours=7))
 
 # --- E. Slip Check Rules ---
 VALID_RECEIVERS = [
-    "กิตติเชษฐ์ บุญอินทร์", "นาย กิตติเชษฐ์ บุญอินทร์", "Mr. kittichet boonin", "Mr. Kittichet Boonin", "MR. KITTICHET BOONIN" ,"KITTICHET BOONIN"
+    "กิตติเชษฐ์ บุญอินทร์", "นาย กิตติเชษฐ์ บุญอินทร์", "Mr. kittichet boonin", "Mr. Kittichet Boonin", "MR. KITTICHET BOONIN" ,"KITTICHET BOONIN"," Kittichet B","นาย กิตติเชษฐ์ บ","KITTICHET B"
 ]
 MIN_AMOUNT = 1
 
@@ -1915,98 +1915,284 @@ def handle_text_message(event):
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
-    if _hit_cooldown(event, "slip_check"): return
+    """ตรวจสลิปจากรูปภาพด้วย Slip2Go
+
+    ✅ จุดแก้สำคัญ:
+    - ถ้า Slip2Go ตอบ code อยู่ใน OK_CODES เช่น 200200 ให้ถือว่าผ่าน checkReceiver แล้ว
+    - ไม่ตรวจชื่อผู้รับซ้ำด้วย exact match อีก เพราะทำให้ชื่อย่อ เช่น "Kittichet B" ตกทั้งที่ API ผ่าน
+    """
+    if _hit_cooldown(event, "slip_check"):
+        return
 
     try:
         # 1. Fetch Image & Prepare Payload
-        content = line_msg_api_blob.get_message_content(message_id=event.message.id, async_req=True)
+        content = line_msg_api_blob.get_message_content(
+            message_id=event.message.id,
+            async_req=True
+        )
         image_bytes = content.get()
 
         url = "https://connect.slip2go.com/api/verify-slip/qr-image/info"
-        headers = {"Authorization": f"Bearer {SLIP2GO_SECRET_KEY}"}
+        headers = {
+            "Authorization": f"Bearer {SLIP2GO_SECRET_KEY}"
+        }
+
+        # ให้ Slip2Go เป็นคนตรวจผู้รับจากเลขบัญชี/ชื่อบัญชี
         payload = {
             "checkDuplicate": True,
-            "checkReceiver": [{
-                "accountType": "01030", "accountNameTH": "กิตติเชษฐ์ บุญอินทร์", "accountNameEN": "MR. KITTICHET BOONIN", "accountNumber": "020424046959"
-            }]
+            "checkReceiver": [
+                {
+                    "accountType": "01030",
+                    "accountNameTH": "กิตติเชษฐ์ บุญอินทร์",
+                    "accountNameEN": "Mr. Kittichet Boonin",
+                    "accountNumber": "020424046959"
+                }
+            ]
         }
 
         # 2. Call Slip2Go API
         r = requests.post(
-            url, headers=headers,
-            files={"file": ("slip.jpg", bytes(image_bytes), "image/jpeg")},
-            data={"payload": json.dumps(payload)}
+            url,
+            headers=headers,
+            files={
+                "file": ("slip.jpg", bytes(image_bytes), "image/jpeg")
+            },
+            data={
+                "payload": json.dumps(payload, ensure_ascii=False)
+            },
+            timeout=30
         )
-        res = r.json()
+
+        try:
+            res = r.json()
+        except Exception:
+            res = {
+                "code": str(r.status_code),
+                "message": r.text[:300]
+            }
+
         code = str(res.get("code", ""))
-        data = res.get("data", {})
+        data = res.get("data", {}) or {}
+
+        print("===== SLIP2GO RESPONSE =====")
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        print("============================")
 
         # 3. Extract Slip Info & Calculate Delay
         fingerprint = slip_fingerprint(data)
-        amount = data.get("amount", 0)
-        receiver_name = data.get("receiver", {}).get("account", {}).get("name", "")
-        sender_name = data.get("sender", {}).get("account", {}).get("name", "")
-        raw_trans_date = data.get("dateTime") or data.get("transDate") or data.get("paidAt") or data.get("transactionDate") or data.get("createdAt") or ""
+
+        try:
+            amount = float(data.get("amount") or 0)
+            if amount.is_integer():
+                amount = int(amount)
+        except Exception:
+            amount = 0
+
+        receiver_name = (
+            data.get("receiver", {})
+            .get("account", {})
+            .get("name", "")
+        )
+
+        sender_name = (
+            data.get("sender", {})
+            .get("account", {})
+            .get("name", "")
+        )
+
+        raw_trans_date = (
+            data.get("dateTime")
+            or data.get("transDate")
+            or data.get("paidAt")
+            or data.get("transactionDate")
+            or data.get("createdAt")
+            or ""
+        )
+
         formatted_trans_date = format_slip_datetime(raw_trans_date)
-        
+
         paid_dt = None
-        try: paid_dt = datetime.fromisoformat(raw_trans_date.replace("Z", "+00:00")).astimezone(TZ_BKK)
-        except: pass
-        
+        try:
+            paid_dt = datetime.fromisoformat(
+                raw_trans_date.replace("Z", "+00:00")
+            ).astimezone(TZ_BKK)
+        except Exception:
+            paid_dt = None
+
         msg_ts_ms = event.timestamp
         sent_dt = datetime.fromtimestamp(msg_ts_ms / 1000, tz=TZ_BKK)
         delay_text = diff_minutes(paid_dt, sent_dt) if paid_dt else "-"
-        
-        # 4. Check Duplicate (Internal Fallback)
+
+        # 4. Internal Duplicate Check
         if fingerprint in USED_SLIP_REF:
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปซ้ำ", contents=flex_duplicate()))
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปซ้ำ",
+                    contents=flex_duplicate()
+                )
+            )
             return
 
         # 5. Check Slip2Go Status and Rules
         OK_CODES = ["200000", "200200", "200501"]
-        
+
         if code in OK_CODES:
-            
-            # 5.1. Check Receiver Name (Multi-name support)
-            valid_name = any((receiver_name or "").strip() == n.strip() for n in VALID_RECEIVERS)
-            if not valid_name:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed("ชื่อผู้รับไม่ถูกต้อง", amount, receiver_name, sender_name)))
+            # ✅ สำคัญ:
+            # Slip2Go ตรวจ checkReceiver ผ่านแล้ว จึงไม่ต้องตรวจ receiver_name ซ้ำแบบ exact match
+            # เพื่อแก้เคส API 200200 แต่บอทตอบ "ชื่อผู้รับไม่ถูกต้อง"
+
+            # 5.1 Check Minimum Amount
+            if amount < MIN_AMOUNT:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    FlexSendMessage(
+                        alt_text="สลิปไม่ผ่าน",
+                        contents=flex_failed(
+                            f"ยอดขั้นต่ำคือ {MIN_AMOUNT} บาท",
+                            amount,
+                            receiver_name,
+                            sender_name
+                        )
+                    )
+                )
                 return
-            
-            # 5.2. Check Minimum Amount
-            valid_amount = amount >= MIN_AMOUNT
-            if not valid_amount:
-                line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed(f"ยอดขั้นต่ำคือ {MIN_AMOUNT} บาท", amount, receiver_name, sender_name)))
-                return
-            
-            # 5.3. Check Delay (Over 20 minutes = 1200 seconds)
+
+            # 5.2 Check Delay
+            # หมายเหตุ: 43200 วินาที = 12 ชั่วโมง คงค่าเดิมตามระบบเดิม
             if paid_dt:
                 diff_sec = (sent_dt - paid_dt).total_seconds()
                 if diff_sec > 43200:
-                    line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="รอแอดมินตรวจสอบ", contents=flex_need_admin_review(amount, sender_name, receiver_name, formatted_trans_date, delay_text)))
+                    line_bot_api.reply_message(
+                        event.reply_token,
+                        FlexSendMessage(
+                            alt_text="รอแอดมินตรวจสอบ",
+                            contents=flex_need_admin_review(
+                                amount,
+                                sender_name,
+                                receiver_name,
+                                formatted_trans_date,
+                                delay_text
+                            )
+                        )
+                    )
                     return
-            
-            # 5.4. PASS: Record Fingerprint & Reply
+
+            # 5.3 PASS: Record Fingerprint & Reply
             USED_SLIP_REF.add(fingerprint)
-            bubble = flex_passed(amount, sender_name, receiver_name, formatted_trans_date, delay_text)
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปผ่าน", contents=bubble))
-            
-        elif code == "400300":
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปซ้ำ", contents=flex_duplicate()))
-        elif code == "400400":
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed("ชื่อผู้รับไม่ถูกต้อง", amount, receiver_name, sender_name)))
-        elif code == "400500":
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed("ยอดเงินไม่ถูกต้อง", amount, receiver_name, sender_name)))
-        elif code in ["400900", "400700", "400800"]:
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed("สลิปเสีย/ปลอม", amount, receiver_name, sender_name)))
-        elif code == "404000":
-            line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed("ไม่พบสลิป / หมดอายุ", amount, receiver_name, sender_name)))
-        else:
-             line_bot_api.reply_message(event.reply_token, FlexSendMessage(alt_text="สลิปไม่ผ่าน", contents=flex_failed(f"ข้อผิดพลาดจากระบบ ({code})", amount, receiver_name, sender_name)))
+            bubble = flex_passed(
+                amount,
+                sender_name,
+                receiver_name,
+                formatted_trans_date,
+                delay_text
+            )
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปผ่าน",
+                    contents=bubble
+                )
+            )
+            return
+
+        # 6. Slip2Go Error Codes
+        if code == "400300":
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปซ้ำ",
+                    contents=flex_duplicate()
+                )
+            )
+            return
+
+        if code == "400400":
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปไม่ผ่าน",
+                    contents=flex_failed(
+                        "ชื่อผู้รับไม่ถูกต้อง",
+                        amount,
+                        receiver_name,
+                        sender_name
+                    )
+                )
+            )
+            return
+
+        if code == "400500":
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปไม่ผ่าน",
+                    contents=flex_failed(
+                        "ยอดเงินไม่ถูกต้อง",
+                        amount,
+                        receiver_name,
+                        sender_name
+                    )
+                )
+            )
+            return
+
+        if code in ["400900", "400700", "400800"]:
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปไม่ผ่าน",
+                    contents=flex_failed(
+                        "สลิปเสีย/ปลอม",
+                        amount,
+                        receiver_name,
+                        sender_name
+                    )
+                )
+            )
+            return
+
+        if code == "404000":
+            line_bot_api.reply_message(
+                event.reply_token,
+                FlexSendMessage(
+                    alt_text="สลิปไม่ผ่าน",
+                    contents=flex_failed(
+                        "ไม่พบสลิป / หมดอายุ",
+                        amount,
+                        receiver_name,
+                        sender_name
+                    )
+                )
+            )
+            return
+
+        message = res.get("message", "ไม่สามารถตรวจสอบสลิปได้")
+        line_bot_api.reply_message(
+            event.reply_token,
+            FlexSendMessage(
+                alt_text="สลิปไม่ผ่าน",
+                contents=flex_failed(
+                    f"ข้อผิดพลาดจากระบบ ({code}) {message}",
+                    amount,
+                    receiver_name,
+                    sender_name
+                )
+            )
+        )
+        return
 
     except Exception as e:
-        print(f"Slip check exception: {e}")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(f"❌ ตรวจสอบสลิปผิดพลาด\n{str(e)}"))
+        print(f"❌ Slip check exception: {e}")
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(
+                    text=f"❌ ตรวจสอบสลิปผิดพลาด\n{str(e)}"
+                )
+            )
+        except Exception as reply_error:
+            print(f"❌ Reply slip error failed: {reply_error}")
 
 
 # ==============================================================================
