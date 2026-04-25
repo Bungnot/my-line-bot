@@ -2,7 +2,7 @@
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-import re, time, os, io, json, hashlib, csv, threading
+import re, time, os, io, json, hashlib, csv, threading, unicodedata
 from datetime import datetime, timezone, timedelta
 import regex as re2
 import requests
@@ -62,6 +62,7 @@ TZ_BKK = timezone(timedelta(hours=7))
 VALID_RECEIVERS = [
     "กิตติเชษฐ์ บุญอินทร์", "นาย กิตติเชษฐ์ บุญอินทร์", "Mr. kittichet boonin", "Mr. Kittichet Boonin", "MR. KITTICHET BOONIN" ,"KITTICHET BOONIN"," Kittichet B","นาย กิตติเชษฐ์ บ","KITTICHET B"
 ]
+EXPECTED_RECEIVER_ACCOUNT = "020424046959"
 MIN_AMOUNT = 1
 
 # --- F. Standard Replies (Plain Text) ---
@@ -340,6 +341,87 @@ def remove_item_and_shift(event, index_to_remove):
     removed = PEH_LIST[key].pop(index_to_remove - 1)
 
     return f"✅ ลบรายการที่ {index_to_remove} เรียบร้อยแล้ว"
+
+
+# --- Receiver Matching Utilities ---
+
+def _normalize_receiver_name(value: str) -> str:
+    """Normalize receiver names to avoid false rejects from spacing/case/hidden chars."""
+    value = unicodedata.normalize("NFKC", str(value or ""))
+    value = value.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    value = re.sub(r"[.]+", "", value)
+    value = re.sub(r"\s+", " ", value).strip().casefold()
+    return value
+
+
+def _receiver_name_is_allowed(receiver_name: str) -> bool:
+    rx = _normalize_receiver_name(receiver_name)
+    allowed = {_normalize_receiver_name(n) for n in VALID_RECEIVERS}
+    return rx in allowed
+
+
+def _receiver_account_candidates(data: dict):
+    """Return possible masked/full receiver account strings from Slip2Go response."""
+    acc = (data or {}).get("receiver", {}).get("account", {}) or {}
+    candidates = []
+
+    def add(v):
+        if v is not None:
+            v = str(v).strip()
+            if v:
+                candidates.append(v)
+
+    # Common Slip2Go / slip parser structures
+    for key in ["number", "account", "accountNo", "accountNumber", "bankAccount", "bank_account"]:
+        add(acc.get(key))
+
+    bank = acc.get("bank", {}) or {}
+    if isinstance(bank, dict):
+        for key in ["account", "number", "accountNo", "accountNumber", "bankAccount", "bank_account"]:
+            add(bank.get(key))
+
+    proxy = acc.get("proxy", {}) or {}
+    if isinstance(proxy, dict):
+        for key in ["account", "number", "accountNo", "accountNumber"]:
+            add(proxy.get(key))
+
+    return candidates
+
+
+def _receiver_account_matches(data: dict, expected_account: str = EXPECTED_RECEIVER_ACCOUNT) -> bool:
+    """Compare visible digits from a masked account with expected account digits."""
+    expected_digits = "".join(re.findall(r"\d", str(expected_account or "")))
+    if not expected_digits:
+        return False
+
+    for text in _receiver_account_candidates(data):
+        # Example: XXX-X-XX046-959 -> 046959, xxx-x-x4046-xxx -> 4046
+        groups = re.findall(r"\d+", text)
+        visible_digits = "".join(groups)
+        if len(visible_digits) >= 4 and visible_digits in expected_digits:
+            return True
+        if any(len(g) >= 4 and g in expected_digits for g in groups):
+            return True
+    return False
+
+
+def _receiver_allowed_by_fallback(data: dict, receiver_name: str) -> bool:
+    """Fallback for Slip2Go code 400400 when slip data clearly shows our receiver.
+
+    Logic:
+    - Name must match one of VALID_RECEIVERS after normalization.
+    - If Slip2Go returns masked account digits, those digits must match EXPECTED_RECEIVER_ACCOUNT.
+    - If no account candidate is returned, name match alone is accepted.
+    """
+    name_ok = _receiver_name_is_allowed(receiver_name)
+    if not name_ok:
+        return False
+
+    candidates = _receiver_account_candidates(data)
+    if candidates:
+        return _receiver_account_matches(data)
+
+    return True
 
 # --- Slip Check Utilities ---
 
@@ -2037,10 +2119,14 @@ def handle_image(event):
         # 5. Check Slip2Go Status and Rules
         OK_CODES = ["200000", "200200", "200501"]
 
-        if code in OK_CODES:
+        receiver_fallback_ok = (code == "400400" and _receiver_allowed_by_fallback(data, receiver_name))
+
+        if code in OK_CODES or receiver_fallback_ok:
             # ✅ สำคัญ:
-            # Slip2Go ตรวจ checkReceiver ผ่านแล้ว จึงไม่ต้องตรวจ receiver_name ซ้ำแบบ exact match
-            # เพื่อแก้เคส API 200200 แต่บอทตอบ "ชื่อผู้รับไม่ถูกต้อง"
+            # 1) ถ้า Slip2Go ตอบ 200xxx ให้ผ่านตาม API
+            # 2) ถ้า Slip2Go ตอบ 400400 แต่ข้อมูลในสลิปเป็นผู้รับของเรา เช่น Kittichet B
+            #    และเลขบัญชีที่เห็นตรงกับ EXPECTED_RECEIVER_ACCOUNT ให้ fallback ผ่านได้
+            # เพื่อแก้เคสธนาคารแสดงชื่อย่อแล้ว API/บอทตัดตกผิดพลาด
 
             # 5.1 Check Minimum Amount
             if amount < MIN_AMOUNT:
@@ -2108,6 +2194,7 @@ def handle_image(event):
             return
 
         if code == "400400":
+            # ถึงตรงนี้แปลว่า fallback แล้วก็ยังไม่ตรงผู้รับ/บัญชีของเรา
             line_bot_api.reply_message(
                 event.reply_token,
                 FlexSendMessage(
