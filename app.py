@@ -50,6 +50,7 @@ _USERS_LOCK = threading.Lock()
 
 # --- D. Global States & Caches ---
 PEH_LIST = {}    # dict[source_key] = [ "ข้อความ..." ]
+CURRENT_CAMP_BY_SOURCE = {}  # dict[source_key] = "ชื่อค่ายล่าสุดจากคำสั่ง เปิด <ชื่อค่าย>"
 SUMMARY_STATS = {"passed": 0, "failed": 0, "draw": 0}
 USED_SLIP_REF = set()
 MSG_CACHE = {}
@@ -116,6 +117,25 @@ def _hit_cooldown(event, cmd_name: str) -> bool:
 def _source_key(event) -> str:
     src = event.source
     return getattr(src, "group_id", None) or getattr(src, "room_id", None) or getattr(src, "user_id", None) or "global"
+
+def format_open_camp_text(camp_name: str) -> str:
+    """ข้อความตอบกลับเมื่อแอดมินพิมพ์: เปิด <ชื่อค่าย>"""
+    return (
+        f"{camp_name}\n\n"
+        "ช่าง ⛔️\n\n"
+        "🚀🚀🚀🚀🚀"
+    )
+
+
+def format_close_camp_text(camp_name: str) -> str:
+    """ข้อความตอบกลับเมื่อแอดมินพิมพ์: ปิด"""
+    return (
+        "❌❌❌❌ ปิด ❌❌❌❌\n\n"
+        "3 2 1 ไป๊!! 🚀🚀🚀\n\n"
+        f"{camp_name}\n\n"
+        "⛔หลังปิดไม่ติดทุกกรณี"
+    )
+
 
 def _display_name(event):
     src = event.source
@@ -1655,6 +1675,47 @@ def handle_text_message(event):
         return
 
     # --- 1. Admin Commands (Requires is_admin) ---
+
+    # 1.0 เปิด <ชื่อค่าย> / ปิด
+    # ตัวอย่าง:
+    # เปิด แอ๊ดเทวดา -> แอ๊ดเทวดา\n\nช่าง ⛔️\n\n🚀🚀🚀🚀🚀
+    # ปิด -> ❌❌❌❌ ปิด ❌❌❌❌ ... พร้อมชื่อค่ายล่าสุด
+    m_open_camp = re.match(r"^เปิด\s+(.+)$", user_text)
+    if m_open_camp and is_admin:
+        camp_name = re.sub(r"\s+", " ", m_open_camp.group(1).strip())
+
+        if not camp_name:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ กรุณาพิมพ์ชื่อค่าย เช่น เปิด แอ๊ดเทวดา")
+            )
+            return
+
+        key = _source_key(event)
+        CURRENT_CAMP_BY_SOURCE[key] = camp_name
+
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=format_open_camp_text(camp_name))
+        )
+        return
+
+    if user_text == "ปิด" and is_admin:
+        key = _source_key(event)
+        camp_name = CURRENT_CAMP_BY_SOURCE.get(key)
+
+        if not camp_name:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ ยังไม่มีชื่อค่ายที่เปิดไว้\nให้พิมพ์ เช่น เปิด แอ๊ดเทวดา ก่อนครับ")
+            )
+            return
+
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=format_close_camp_text(camp_name))
+        )
+        return
 
 # 1.1. เปะ / ตึ้ง / ลบ [เลข] / ล้างรายการ
     if is_admin and re.match(r"^(?:เปะ|ตึ้ง)\b", user_text):
