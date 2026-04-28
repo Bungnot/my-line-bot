@@ -244,6 +244,16 @@ def _search_uid_by_name(name_query: str, limit: int = 5):
 
 # ===== ใส่เพิ่มไว้แถว ๆ "Peh (List) Utilities" ก่อน _add_peh_item ก็ได้ =====
 
+def _extract_emoji_clusters(text: str, limit: int = 2) -> str:
+    """ดึง emoji แบบ grapheme cluster เพื่อไม่ให้ emoji เช่น ⛔️ ถูกตัดครึ่ง"""
+    clusters = re2.findall(r"\X", text or "")
+    emojis = [
+        c for c in clusters
+        if re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", c)
+    ]
+    return "".join(emojis[:limit])
+
+
 def _base_peh_name(name: str) -> str:
     """ตัดท้าย (ตัวเลข) ออก เพื่อใช้เป็นชื่อฐานในการเทียบซ้ำ"""
     name = (name or "").strip()
@@ -297,7 +307,7 @@ def _add_peh_item(event, text):
         PEH_LIST[key].append({
             "name": deduped_name,          # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
             "worker_price": worker_price, # ราคาช่างที่ใช้กับรายการนี้
-            "tail": tail[:6]
+            "tail": tail
         })
 
         # 🔥 HARD LIMIT 100 รายการ
@@ -329,8 +339,7 @@ def format_peh_text_anyway(raw_text):
     if lost_match:
         name = lost_match.group(1).strip() or text
         tail_raw = lost_match.group(2).strip()
-        emojis = re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", tail_raw)
-        emoji_text = "".join(emojis)[:2]
+        emoji_text = _extract_emoji_clusters(tail_raw, limit=2)
         tail = f"หาย{emoji_text}"
         return name, tail
 
@@ -348,13 +357,9 @@ def format_peh_text_anyway(raw_text):
     number = match.group(2)           # ส่วนของตัวเลข (เช่น 290)
     tail_raw = match.group(3).strip() # ส่วนของ Emoji/ข้อความต่อท้าย
 
-    # 4) ดึง Emoji จากส่วนท้าย และจำกัดให้เหลือสูงสุด 2 ตัว
-    emojis = re.findall(
-        r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+",
-        tail_raw
-    )
-    # รวม Emoji ทั้งหมดเข้าด้วยกัน แล้วตัดเอาแค่ 2 ตัวแรก
-    emoji_text = "".join(emojis)[:2]
+    # 4) ดึง Emoji จากส่วนท้ายแบบ grapheme cluster และจำกัดให้เหลือสูงสุด 2 ตัว
+    # สำคัญ: ห้ามใช้ [:2] กับ emoji เพราะบางตัว เช่น ⛔️ มีมากกว่า 1 code point
+    emoji_text = _extract_emoji_clusters(tail_raw, limit=2)
 
     # 5) รวมเลข + emoji (สูงสุด 2 ตัว) เพื่อแสดงผลในช่อง "ท้าย"
     tail = f"{number}{emoji_text}"
@@ -651,49 +656,61 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "layout": "horizontal",
                 "alignItems": "center",
                 "contents": [
-                    # ลำดับ
+                    # ฝั่งซ้าย: ลำดับ + ชื่อ
+                    # ให้ flex ฝั่งซ้าย = ฝั่งขวา เพื่อให้ "ราคาช่าง" อยู่กึ่งกลางแถวจริง
                     {
-                        "type": "text",
-                        "text": f"{i}.",
-                        "size": "sm",
-                        "color": "#475569",
-                        "weight": "bold",
-                        "flex": 0
+                        "type": "box",
+                        "layout": "horizontal",
+                        "alignItems": "center",
+                        "flex": 7,
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": f"{i}.",
+                                "size": "xs",
+                                "color": "#475569",
+                                "weight": "bold",
+                                "flex": 0
+                            },
+                            {
+                                "type": "text",
+                                "text": item["name"],
+                                "size": "xs",
+                                "color": "#111827",
+                                "wrap": False,
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit",
+                                "flex": 1,
+                                "margin": "xs"
+                            }
+                        ]
                     },
 
-                    # ชื่อ
-                    {
-                        "type": "text",
-                        "text": item["name"],
-                        "size": "sm",
-                        "color": "#111827",
-                        "wrap": True,
-                        "flex": 6,
-                        "margin": "sm"
-                    },
-
-                    # ราคาช่างล่าสุดที่ถูกบันทึกไว้กับรายการนี้ (แสดงกลางแถว)
+                    # ตรงกลาง: ราคาช่าง เช่น 320-360
                     {
                         "type": "text",
                         "text": item.get("worker_price", "") or "",
-                        "size": "sm",
+                        "size": "xs",
                         "color": "#0F172A",
                         "align": "center",
                         "maxLines": 1,
+                        "adjustMode": "shrink-to-fit",
                         "flex": 4,
-                        "margin": "sm"
+                        "margin": "none"
                     },
 
-                    # ราคา + ผล (ชิดขวา)
+                    # ฝั่งขวา: สกอ + emoji ต้องเห็นครบ เช่น 440⛔️⛔️
                     {
                         "type": "text",
                         "text": item.get("tail", "") or "",
-                        "size": "sm",
+                        "size": "xs",
                         "weight": "bold",
                         "color": "#0F172A",
                         "align": "end",
                         "maxLines": 1,
-                        "flex": 3
+                        "adjustMode": "shrink-to-fit",
+                        "flex": 7,
+                        "margin": "none"
                     }
                 ]
             })
