@@ -623,6 +623,14 @@ def flex_account_v2():
     }
 
 def flex_peh_list_pages(title, items, page_size=30):
+    """
+    FLEX สรุปรายการสกอแบบตาราง
+    คอลัมน์: ชื่อค่าย / ราคาช่าง / ผล
+
+    หมายเหตุ:
+    - LINE Flex ขนาดใหญ่สุดคือ giga จึงใช้ giga แล้วเพิ่มพื้นที่ใช้งานจริงด้วยการลด padding
+    - ชื่อค่ายให้ขึ้นได้ 2 บรรทัด เพื่อไม่ให้โดนตัดเป็น ... ง่ายเกินไป
+    """
     MAX_PAGES = 5
     PAGE_SIZE = page_size or 30
     MAX_ITEMS = MAX_PAGES * PAGE_SIZE  # = 150 เมื่อ page_size = 30
@@ -633,6 +641,11 @@ def flex_peh_list_pages(title, items, page_size=30):
 
     passed, failed, draw = count_result_from_items(items)
     summary_text = f"✅ ผ่าน {passed}   ❌ แพ้ {failed}   ⛔ จาว {draw}"
+
+    # ปรับความกว้างคอลัมน์ตรงนี้ได้ หากต้องการจูนหน้าตาเพิ่มเติม
+    INDEX_W = "24px"
+    PRICE_W = "84px"
+    RESULT_W = "78px"
 
     for page in range(total_pages):
         start = page * PAGE_SIZE
@@ -646,7 +659,9 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "weight": "bold",
                 "size": "md",
                 "align": "center",
-                "color": "#0F172A"
+                "color": "#0F172A",
+                "wrap": True,
+                "adjustMode": "shrink-to-fit"
             },
             {
                 "type": "text",
@@ -663,7 +678,8 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "align": "center",
                 "weight": "bold",
                 "color": "#334155",
-                "margin": "sm"
+                "margin": "sm",
+                "adjustMode": "shrink-to-fit"
             },
             {
                 "type": "text",
@@ -671,42 +687,128 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "size": "xs",
                 "align": "center",
                 "color": "#64748B",
-                "margin": "xs"
+                "margin": "xs",
+                "adjustMode": "shrink-to-fit"
             },
             {
                 "type": "separator",
                 "margin": "sm",
                 "color": "#E5E7EB"
-            }
-        ]
-
-        # =========
-        # LIST: ชื่อ / ราคาช่างกลาง / ผลด้านขวา
-        # =========
-        for i, item in enumerate(page_items, start=start + 1):
-            worker_price = (item.get("worker_price") or "----").strip() or "----"
-            tail_text = (item.get("tail") or "").strip()
-
-            # แก้ระยะห่างคอลัมน์ให้ราคาช่างอยู่กลาง และผลด้านขวาไม่ติดกัน
-            # หมายเหตุ: LINE Flex ไม่รองรับ width บน text ทุกกรณี จึงครอบด้วย box ที่กำหนด width แทน
-            contents.append({
+            },
+            # ===== หัวตาราง =====
+            {
                 "type": "box",
                 "layout": "horizontal",
                 "alignItems": "center",
-                "spacing": "sm",
-                "paddingTop": "4px",
-                "paddingBottom": "4px",
+                "spacing": "none",
+                "paddingTop": "6px",
+                "paddingBottom": "5px",
+                "backgroundColor": "#F8FAFC",
                 "contents": [
                     {
                         "type": "box",
                         "layout": "horizontal",
                         "alignItems": "center",
                         "flex": 1,
+                        "paddingStart": "2px",
                         "contents": [
                             {
                                 "type": "box",
                                 "layout": "vertical",
-                                "width": "28px",
+                                "width": INDEX_W,
+                                "flex": 0,
+                                "contents": []
+                            },
+                            {
+                                "type": "text",
+                                "text": "ชื่อค่าย",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#475569",
+                                "align": "start",
+                                "flex": 1,
+                                "margin": "xs",
+                                "wrap": False,
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "width": PRICE_W,
+                        "flex": 0,
+                        "alignItems": "center",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "ราคาช่าง",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#475569",
+                                "align": "center",
+                                "wrap": False,
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "box",
+                        "layout": "vertical",
+                        "width": RESULT_W,
+                        "flex": 0,
+                        "alignItems": "flex-end",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "ผล",
+                                "size": "xs",
+                                "weight": "bold",
+                                "color": "#475569",
+                                "align": "end",
+                                "wrap": False,
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "type": "separator",
+                "margin": "none",
+                "color": "#E5E7EB"
+            }
+        ]
+
+        # =========
+        # LIST: อันดับ+ชื่อค่าย / ราคาช่างกลาง / ผลด้านขวา
+        # =========
+        for i, item in enumerate(page_items, start=start + 1):
+            worker_price = (item.get("worker_price") or "----").strip() or "----"
+            tail_text = (item.get("tail") or "").strip()
+
+            contents.append({
+                "type": "box",
+                "layout": "horizontal",
+                "alignItems": "center",
+                "spacing": "none",
+                "paddingTop": "6px",
+                "paddingBottom": "6px",
+                "contents": [
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "alignItems": "center",
+                        "flex": 1,
+                        "paddingStart": "2px",
+                        "contents": [
+                            {
+                                "type": "box",
+                                "layout": "vertical",
+                                "width": INDEX_W,
                                 "flex": 0,
                                 "contents": [
                                     {
@@ -714,7 +816,11 @@ def flex_peh_list_pages(title, items, page_size=30):
                                         "text": f"{i}.",
                                         "size": "sm",
                                         "color": "#475569",
-                                        "weight": "bold"
+                                        "weight": "bold",
+                                        "align": "start",
+                                        "wrap": False,
+                                        "maxLines": 1,
+                                        "adjustMode": "shrink-to-fit"
                                     }
                                 ]
                             },
@@ -723,17 +829,19 @@ def flex_peh_list_pages(title, items, page_size=30):
                                 "text": item.get("name", "-"),
                                 "size": "sm",
                                 "color": "#111827",
-                                "wrap": False,
-                                "maxLines": 1,
+                                "weight": "bold",
+                                "wrap": True,
+                                "maxLines": 2,
                                 "flex": 1,
-                                "margin": "sm"
+                                "margin": "xs",
+                                "adjustMode": "shrink-to-fit"
                             }
                         ]
                     },
                     {
                         "type": "box",
                         "layout": "vertical",
-                        "width": "96px",
+                        "width": PRICE_W,
                         "flex": 0,
                         "alignItems": "center",
                         "contents": [
@@ -745,14 +853,15 @@ def flex_peh_list_pages(title, items, page_size=30):
                                 "color": "#334155",
                                 "align": "center",
                                 "wrap": False,
-                                "maxLines": 1
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit"
                             }
                         ]
                     },
                     {
                         "type": "box",
                         "layout": "vertical",
-                        "width": "96px",
+                        "width": RESULT_W,
                         "flex": 0,
                         "alignItems": "flex-end",
                         "contents": [
@@ -764,7 +873,8 @@ def flex_peh_list_pages(title, items, page_size=30):
                                 "color": "#0F172A",
                                 "align": "end",
                                 "wrap": False,
-                                "maxLines": 1
+                                "maxLines": 1,
+                                "adjustMode": "shrink-to-fit"
                             }
                         ]
                     }
@@ -783,7 +893,11 @@ def flex_peh_list_pages(title, items, page_size=30):
             "body": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "12px",
+                # ลด padding ซ้าย-ขวา เพื่อเพิ่มพื้นที่ให้ชื่อค่ายมากที่สุด
+                "paddingTop": "12px",
+                "paddingBottom": "12px",
+                "paddingStart": "8px",
+                "paddingEnd": "8px",
                 "backgroundColor": "#FFFFFF",
                 "contents": contents
             }
