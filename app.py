@@ -52,7 +52,6 @@ _USERS_LOCK = threading.Lock()
 PEH_LIST = {}    # dict[source_key] = [ "ข้อความ..." ]
 CURRENT_CAMP_BY_SOURCE = {}  # dict[source_key] = "ชื่อค่ายล่าสุดจากคำสั่ง เปิด <ชื่อค่าย>"
 CURRENT_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างล่าสุดจากคำสั่ง ราคาช่าง <ราคา>"
-PENDING_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างที่รอผูกกับสกอถัดไปเท่านั้น"
 SUMMARY_STATS = {"passed": 0, "failed": 0, "draw": 0}
 USED_SLIP_REF = set()
 MSG_CACHE = {}
@@ -245,16 +244,6 @@ def _search_uid_by_name(name_query: str, limit: int = 5):
 
 # ===== ใส่เพิ่มไว้แถว ๆ "Peh (List) Utilities" ก่อน _add_peh_item ก็ได้ =====
 
-def _extract_emoji_clusters(text: str, limit: int = 2) -> str:
-    """ดึง emoji แบบ grapheme cluster เพื่อไม่ให้ emoji เช่น ⛔️ ถูกตัดครึ่ง"""
-    clusters = re2.findall(r"\X", text or "")
-    emojis = [
-        c for c in clusters
-        if re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", c)
-    ]
-    return "".join(emojis[:limit])
-
-
 def _base_peh_name(name: str) -> str:
     """ตัดท้าย (ตัวเลข) ออก เพื่อใช้เป็นชื่อฐานในการเทียบซ้ำ"""
     name = (name or "").strip()
@@ -298,21 +287,12 @@ def _add_peh_item(event, text):
         name, tail = format_peh_text_anyway(text)
         name = name if name else "-"
 
-        # ✅ ราคาช่างล่าสุดที่แอดมินแจ้ง เช่น "ราคาช่าง 320-360"
-        # รายการสกอที่เพิ่มหลังจากนี้ จะจำราคาช่างชุดนี้ไว้กับรายการนั้นทันที
-        # ราคาช่างเป็นแบบ one-shot:
-        # ถ้าแอดมินพิมพ์ "ราคาช่าง 320-360"
-        # ราคานี้จะถูกผูกกับสกอรายการถัดไปเพียงรายการเดียว แล้วล้างออกทันที
-        # ดังนั้นรายการเก่าที่นำมารีโค้ด/ตึ้งย้อนหลัง จะไม่ขึ้นตัวเลขช่าง
-        worker_price = str(PENDING_CAMP_PRICE_BY_SOURCE.pop(key, "") or "").strip()
-
         # ถ้าชื่อซ้ำ: ใช้ชื่อที่ได้จากการจัดการ
         deduped_name = _dedupe_peh_name(PEH_LIST[key], name, max_len=40)
 
         PEH_LIST[key].append({
-            "name": deduped_name,          # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
-            "worker_price": worker_price, # ราคาช่างที่ใช้กับรายการนี้
-            "tail": tail
+            "name": deduped_name,  # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
+            "tail": tail[:6]
         })
 
         # 🔥 HARD LIMIT 100 รายการ
@@ -344,7 +324,8 @@ def format_peh_text_anyway(raw_text):
     if lost_match:
         name = lost_match.group(1).strip() or text
         tail_raw = lost_match.group(2).strip()
-        emoji_text = _extract_emoji_clusters(tail_raw, limit=2)
+        emojis = re.findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", tail_raw)
+        emoji_text = "".join(emojis)[:2]
         tail = f"หาย{emoji_text}"
         return name, tail
 
@@ -362,9 +343,13 @@ def format_peh_text_anyway(raw_text):
     number = match.group(2)           # ส่วนของตัวเลข (เช่น 290)
     tail_raw = match.group(3).strip() # ส่วนของ Emoji/ข้อความต่อท้าย
 
-    # 4) ดึง Emoji จากส่วนท้ายแบบ grapheme cluster และจำกัดให้เหลือสูงสุด 2 ตัว
-    # สำคัญ: ห้ามใช้ [:2] กับ emoji เพราะบางตัว เช่น ⛔️ มีมากกว่า 1 code point
-    emoji_text = _extract_emoji_clusters(tail_raw, limit=2)
+    # 4) ดึง Emoji จากส่วนท้าย และจำกัดให้เหลือสูงสุด 2 ตัว
+    emojis = re.findall(
+        r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+",
+        tail_raw
+    )
+    # รวม Emoji ทั้งหมดเข้าด้วยกัน แล้วตัดเอาแค่ 2 ตัวแรก
+    emoji_text = "".join(emojis)[:2]
 
     # 5) รวมเลข + emoji (สูงสุด 2 ตัว) เพื่อแสดงผลในช่อง "ท้าย"
     tail = f"{number}{emoji_text}"
@@ -592,21 +577,6 @@ def flex_account_v2():
         }
     }
 
-def _item_worker_price(item: dict) -> str:
-    """คืนค่าราคาช่างที่ถูกบันทึกไว้กับรายการนั้นเท่านั้น
-
-    สำคัญ:
-    - ถ้ารายการถูกเพิ่มตอนที่ยังไม่ได้พิมพ์คำสั่ง "ราคาช่าง ..."
-      ช่องกลางต้องว่าง ไม่ดึงราคาล่าสุดมาแสดงย้อนหลัง
-    - ถ้ารายการถูกเพิ่มหลังพิมพ์ "ราคาช่าง 320-360"
-      รายการนั้นจะจำ 320-360 ไว้
-    - ถ้าราคาช่างถูกเปลี่ยนภายหลัง รายการเก่าจะไม่เปลี่ยนตาม
-    """
-    if not isinstance(item, dict):
-        return ""
-    return str(item.get("worker_price") or "").strip()
-
-
 def flex_peh_list_pages(title, items, page_size=30):
     MAX_PAGES = 5
     PAGE_SIZE = 30
@@ -676,61 +646,36 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "layout": "horizontal",
                 "alignItems": "center",
                 "contents": [
-                    # ฝั่งซ้าย: ลำดับ + ชื่อ
-                    # ให้ flex ฝั่งซ้าย = ฝั่งขวา เพื่อให้ "ราคาช่าง" อยู่กึ่งกลางแถวจริง
-                    {
-                        "type": "box",
-                        "layout": "horizontal",
-                        "alignItems": "center",
-                        "flex": 7,
-                        "contents": [
-                            {
-                                "type": "text",
-                                "text": f"{i}.",
-                                "size": "xs",
-                                "color": "#475569",
-                                "weight": "bold",
-                                "flex": 0
-                            },
-                            {
-                                "type": "text",
-                                "text": item["name"],
-                                "size": "xs",
-                                "color": "#111827",
-                                "wrap": False,
-                                "maxLines": 1,
-                                "adjustMode": "shrink-to-fit",
-                                "flex": 1,
-                                "margin": "xs"
-                            }
-                        ]
-                    },
-
-                    # ตรงกลาง: ราคาช่าง เช่น 320-360
+                    # ลำดับ
                     {
                         "type": "text",
-                        "text": _item_worker_price(item),
-                        "size": "xs",
-                        "color": "#0F172A",
-                        "align": "center",
-                        "maxLines": 1,
-                        "adjustMode": "shrink-to-fit",
-                        "flex": 4,
-                        "margin": "none"
+                        "text": f"{i}.",
+                        "size": "sm",
+                        "color": "#475569",
+                        "weight": "bold",
+                        "flex": 0
                     },
 
-                    # ฝั่งขวา: สกอ + emoji ต้องเห็นครบ เช่น 440⛔️⛔️
+                    # ชื่อ
                     {
                         "type": "text",
-                        "text": item.get("tail", "") or "",
-                        "size": "xs",
+                        "text": item["name"],
+                        "size": "sm",
+                        "color": "#111827",
+                        "wrap": True,
+                        "flex": 1,
+                        "margin": "sm"
+                    },
+
+                    # ราคา + ผล (ชิดขวา)
+                    {
+                        "type": "text",
+                        "text": item["tail"] or "",
+                        "size": "sm",
                         "weight": "bold",
                         "color": "#0F172A",
                         "align": "end",
-                        "maxLines": 1,
-                        "adjustMode": "shrink-to-fit",
-                        "flex": 7,
-                        "margin": "none"
+                        "flex": 0
                     }
                 ]
             })
@@ -1787,11 +1732,7 @@ def handle_text_message(event):
             )
             return
 
-        # เก็บไว้เป็นราคาล่าสุดสำหรับข้อความเปิด/ปิด
         CURRENT_CAMP_PRICE_BY_SOURCE[key] = worker_price
-
-        # เก็บไว้เป็นราคาที่รอใช้กับสกอถัดไปเท่านั้น
-        PENDING_CAMP_PRICE_BY_SOURCE[key] = worker_price
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1818,7 +1759,7 @@ def handle_text_message(event):
         return
 
 # 1.1. เปะ / ตึ้ง / ลบ [เลข] / ล้างรายการ
-    if is_admin and re.match(r"^\s*(?:เปะ|ตึ้ง)(?:\s|$)", user_text):
+    if is_admin and re.match(r"^(?:เปะ|ตึ้ง)\b", user_text):
         lines = user_text.split("\n")
         added = False
         final_output = None
@@ -1830,13 +1771,13 @@ def handle_text_message(event):
             
             # 🔍 ตรวจสอบ: ถ้ามีแค่ "เปะ" ตามด้วยเลขตัวเดียว (อาจมีหรือไม่มีสัญลักษณ์ต่อท้าย)
             # เช่น "เปะ 5" หรือ "เปะ 5❌" หรือ "เปะ รายการ 5❌"
-            if re.search(r"^\s*(?:เปะ|ตึ้ง)\s+.*\b\d\b[❌✅]*$", line) or re.match(r"^\s*(?:เปะ|ตึ้ง)\s+\d$", line):
+            if re.search(r"^(?:เปะ|ตึ้ง)\s+.*\b\d\b[❌✅]*$", line) or re.match(r"^(?:เปะ|ตึ้ง)\s+\d$", line):
                 error_messages.append(f"⚠️ ใส่รายการให้ถูกต้อง: '{line}'\n(บอทไม่รับเลขหลักเดียวครับ)")
                 continue
 
             # ✅ รูปแบบที่ถูกต้อง: เปะ + ชื่อ + เลข 2 หลักขึ้นไป (ยอมรับ ❌ ต่อท้ายได้)
             # เช่น "เปะ เทพปกร 50" หรือ "เปะ เทพปกร 50❌❌"
-            m = re.match(r"^\s*(?:เปะ|ตึ้ง)\s+(.+)$", line)
+            m = re.match(r"^(?:เปะ|ตึ้ง)\s+(.+)$", line)
             if m:
                 item_text = m.group(1).strip()
                 has_valid_number = bool(re.search(r"\d{2,}", item_text))
@@ -1876,7 +1817,6 @@ def handle_text_message(event):
     if user_text.lower() == "ล้างรายการ" and is_admin:
         key = _source_key(event)
         PEH_LIST[key] = []
-        PENDING_CAMP_PRICE_BY_SOURCE.pop(key, None)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ล้างรายการเรียบร้อย"))
         return
 
