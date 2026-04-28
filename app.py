@@ -52,6 +52,7 @@ _USERS_LOCK = threading.Lock()
 PEH_LIST = {}    # dict[source_key] = [ "ข้อความ..." ]
 CURRENT_CAMP_BY_SOURCE = {}  # dict[source_key] = "ชื่อค่ายล่าสุดจากคำสั่ง เปิด <ชื่อค่าย>"
 CURRENT_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างล่าสุดจากคำสั่ง ราคาช่าง <ราคา>"
+PENDING_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างที่รอผูกกับสกอถัดไปเท่านั้น"
 SUMMARY_STATS = {"passed": 0, "failed": 0, "draw": 0}
 USED_SLIP_REF = set()
 MSG_CACHE = {}
@@ -299,9 +300,11 @@ def _add_peh_item(event, text):
 
         # ✅ ราคาช่างล่าสุดที่แอดมินแจ้ง เช่น "ราคาช่าง 320-360"
         # รายการสกอที่เพิ่มหลังจากนี้ จะจำราคาช่างชุดนี้ไว้กับรายการนั้นทันที
-        # ดึงราคาช่างล่าสุด ณ เวลาที่เพิ่มรายการเท่านั้น
-        # ถ้ายังไม่เคยตั้ง "ราคาช่าง ..." ให้เป็นค่าว่าง เพื่อไม่ให้แสดงราคาในรายการนั้น
-        worker_price = str(CURRENT_CAMP_PRICE_BY_SOURCE.get(key) or "").strip()
+        # ราคาช่างเป็นแบบ one-shot:
+        # ถ้าแอดมินพิมพ์ "ราคาช่าง 320-360"
+        # ราคานี้จะถูกผูกกับสกอรายการถัดไปเพียงรายการเดียว แล้วล้างออกทันที
+        # ดังนั้นรายการเก่าที่นำมารีโค้ด/ตึ้งย้อนหลัง จะไม่ขึ้นตัวเลขช่าง
+        worker_price = str(PENDING_CAMP_PRICE_BY_SOURCE.pop(key, "") or "").strip()
 
         # ถ้าชื่อซ้ำ: ใช้ชื่อที่ได้จากการจัดการ
         deduped_name = _dedupe_peh_name(PEH_LIST[key], name, max_len=40)
@@ -1784,7 +1787,11 @@ def handle_text_message(event):
             )
             return
 
+        # เก็บไว้เป็นราคาล่าสุดสำหรับข้อความเปิด/ปิด
         CURRENT_CAMP_PRICE_BY_SOURCE[key] = worker_price
+
+        # เก็บไว้เป็นราคาที่รอใช้กับสกอถัดไปเท่านั้น
+        PENDING_CAMP_PRICE_BY_SOURCE[key] = worker_price
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1811,7 +1818,7 @@ def handle_text_message(event):
         return
 
 # 1.1. เปะ / ตึ้ง / ลบ [เลข] / ล้างรายการ
-    if is_admin and re.match(r"^(?:เปะ|ตึ้ง)\b", user_text):
+    if is_admin and re.match(r"^\s*(?:เปะ|ตึ้ง)(?:\s|$)", user_text):
         lines = user_text.split("\n")
         added = False
         final_output = None
@@ -1823,13 +1830,13 @@ def handle_text_message(event):
             
             # 🔍 ตรวจสอบ: ถ้ามีแค่ "เปะ" ตามด้วยเลขตัวเดียว (อาจมีหรือไม่มีสัญลักษณ์ต่อท้าย)
             # เช่น "เปะ 5" หรือ "เปะ 5❌" หรือ "เปะ รายการ 5❌"
-            if re.search(r"^(?:เปะ|ตึ้ง)\s+.*\b\d\b[❌✅]*$", line) or re.match(r"^(?:เปะ|ตึ้ง)\s+\d$", line):
+            if re.search(r"^\s*(?:เปะ|ตึ้ง)\s+.*\b\d\b[❌✅]*$", line) or re.match(r"^\s*(?:เปะ|ตึ้ง)\s+\d$", line):
                 error_messages.append(f"⚠️ ใส่รายการให้ถูกต้อง: '{line}'\n(บอทไม่รับเลขหลักเดียวครับ)")
                 continue
 
             # ✅ รูปแบบที่ถูกต้อง: เปะ + ชื่อ + เลข 2 หลักขึ้นไป (ยอมรับ ❌ ต่อท้ายได้)
             # เช่น "เปะ เทพปกร 50" หรือ "เปะ เทพปกร 50❌❌"
-            m = re.match(r"^(?:เปะ|ตึ้ง)\s+(.+)$", line)
+            m = re.match(r"^\s*(?:เปะ|ตึ้ง)\s+(.+)$", line)
             if m:
                 item_text = m.group(1).strip()
                 has_valid_number = bool(re.search(r"\d{2,}", item_text))
@@ -1869,6 +1876,7 @@ def handle_text_message(event):
     if user_text.lower() == "ล้างรายการ" and is_admin:
         key = _source_key(event)
         PEH_LIST[key] = []
+        PENDING_CAMP_PRICE_BY_SOURCE.pop(key, None)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ล้างรายการเรียบร้อย"))
         return
 
