@@ -51,6 +51,7 @@ _USERS_LOCK = threading.Lock()
 # --- D. Global States & Caches ---
 PEH_LIST = {}    # dict[source_key] = [ "ข้อความ..." ]
 CURRENT_CAMP_BY_SOURCE = {}  # dict[source_key] = "ชื่อค่ายล่าสุดจากคำสั่ง เปิด <ชื่อค่าย>"
+CURRENT_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างล่าสุดจากคำสั่ง ราคาช่าง <ราคา>"
 SUMMARY_STATS = {"passed": 0, "failed": 0, "draw": 0}
 USED_SLIP_REF = set()
 MSG_CACHE = {}
@@ -118,21 +119,29 @@ def _source_key(event) -> str:
     src = event.source
     return getattr(src, "group_id", None) or getattr(src, "room_id", None) or getattr(src, "user_id", None) or "global"
 
-def format_open_camp_text(camp_name: str) -> str:
+def _format_worker_text(worker_price: str = None) -> str:
+    """ประกอบข้อความช่าง โดยรองรับทั้งยังไม่ใส่ราคา และใส่ราคาแล้ว"""
+    worker_price = (worker_price or "").strip()
+    if worker_price:
+        return f"ช่าง {worker_price}⛔️"
+    return "ช่าง ⛔️"
+
+
+def format_open_camp_text(camp_name: str, worker_price: str = None) -> str:
     """ข้อความตอบกลับเมื่อแอดมินพิมพ์: เปิด <ชื่อค่าย>"""
     return (
         f"{camp_name}\n\n"
-        "ช่าง ⛔️\n\n"
+        f"{_format_worker_text(worker_price)}\n\n"
         "🚀🚀🚀🚀🚀"
     )
 
 
-def format_close_camp_text(camp_name: str) -> str:
+def format_close_camp_text(camp_name: str, worker_price: str = None) -> str:
     """ข้อความตอบกลับเมื่อแอดมินพิมพ์: ปิด"""
     return (
         "❌❌❌❌ ปิด ❌❌❌❌\n\n"
         "3 2 1 ไป๊!! 🚀🚀🚀\n\n"
-        f"{camp_name}\n\n"
+        f"{camp_name}  {_format_worker_text(worker_price)}\n\n"
         "⛔หลังปิดไม่ติดทุกกรณี"
     )
 
@@ -1676,10 +1685,11 @@ def handle_text_message(event):
 
     # --- 1. Admin Commands (Requires is_admin) ---
 
-    # 1.0 เปิด <ชื่อค่าย> / ปิด
-    # ตัวอย่าง:
-    # เปิด แอ๊ดเทวดา -> แอ๊ดเทวดา\n\nช่าง ⛔️\n\n🚀🚀🚀🚀🚀
-    # ปิด -> ❌❌❌❌ ปิด ❌❌❌❌ ... พร้อมชื่อค่ายล่าสุด
+    # 1.0 เปิด <ชื่อค่าย> / ราคาช่าง <ราคา> / ปิด
+    # ตัวอย่างลำดับคำสั่ง:
+    # เปิด เก่งเจริญ -> เก่งเจริญ\n\nช่าง ⛔️\n\n🚀🚀🚀🚀🚀
+    # ราคาช่าง 330-360 -> เก่งเจริญ\n\nช่าง 330-360⛔️\n\n🚀🚀🚀🚀🚀
+    # ปิด -> ❌❌❌❌ ปิด ❌❌❌❌ ... พร้อมชื่อค่าย + ราคาช่างล่าสุด
     m_open_camp = re.match(r"^เปิด\s+(.+)$", user_text)
     if m_open_camp and is_admin:
         camp_name = re.sub(r"\s+", " ", m_open_camp.group(1).strip())
@@ -1693,6 +1703,8 @@ def handle_text_message(event):
 
         key = _source_key(event)
         CURRENT_CAMP_BY_SOURCE[key] = camp_name
+        # เปิดค่ายใหม่ ให้ล้างราคาช่างเดิม เพื่อไม่ให้ราคาของค่ายเก่าติดมาด้วย
+        CURRENT_CAMP_PRICE_BY_SOURCE.pop(key, None)
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1700,9 +1712,38 @@ def handle_text_message(event):
         )
         return
 
+    m_worker_price = re.match(r"^ราคาช่าง\s*(.+)$", user_text)
+    if m_worker_price and is_admin:
+        key = _source_key(event)
+        camp_name = CURRENT_CAMP_BY_SOURCE.get(key)
+
+        if not camp_name:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ ยังไม่มีชื่อค่ายที่เปิดไว้\nให้พิมพ์ เช่น เปิด เก่งเจริญ ก่อนครับ")
+            )
+            return
+
+        worker_price = re.sub(r"\s+", " ", m_worker_price.group(1).strip())
+        if not worker_price:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⚠️ กรุณาพิมพ์ราคา เช่น ราคาช่าง 330-360")
+            )
+            return
+
+        CURRENT_CAMP_PRICE_BY_SOURCE[key] = worker_price
+
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=format_open_camp_text(camp_name, worker_price))
+        )
+        return
+
     if user_text == "ปิด" and is_admin:
         key = _source_key(event)
         camp_name = CURRENT_CAMP_BY_SOURCE.get(key)
+        worker_price = CURRENT_CAMP_PRICE_BY_SOURCE.get(key)
 
         if not camp_name:
             line_bot_api.reply_message(
@@ -1713,7 +1754,7 @@ def handle_text_message(event):
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=format_close_camp_text(camp_name))
+            TextSendMessage(text=format_close_camp_text(camp_name, worker_price))
         )
         return
 
