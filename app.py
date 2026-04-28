@@ -52,6 +52,7 @@ _USERS_LOCK = threading.Lock()
 PEH_LIST = {}    # dict[source_key] = [ "ข้อความ..." ]
 CURRENT_CAMP_BY_SOURCE = {}  # dict[source_key] = "ชื่อค่ายล่าสุดจากคำสั่ง เปิด <ชื่อค่าย>"
 CURRENT_CAMP_PRICE_BY_SOURCE = {}  # dict[source_key] = "ราคาช่างล่าสุดจากคำสั่ง ราคาช่าง <ราคา>"
+CAMP_WORKER_PRICE_BY_SOURCE = {}  # dict[source_key][camp_name] = ราคาช่างของค่ายนั้น (ใช้แสดงกลาง FLEX สกอ)
 SUMMARY_STATS = {"passed": 0, "failed": 0, "draw": 0}
 USED_SLIP_REF = set()
 MSG_CACHE = {}
@@ -251,6 +252,44 @@ def _base_peh_name(name: str) -> str:
     return re.sub(r"\s*\(\d+\)\s*$", "", name).strip()
 
 
+def _plain_camp_name_for_price(name: str) -> str:
+    """
+    ทำชื่อค่ายให้เป็นชื่อฐานสำหรับเทียบราคาช่าง
+    - ตัดท้าย (1), (2) ที่ระบบกันชื่อซ้ำเติมให้
+    - ตัดวงเล็บคำอธิบายท้ายชื่อ เช่น โก๋แก่(ไม่มี) -> โก๋แก่
+    """
+    name = _base_peh_name(name or "")
+    name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    return name
+
+
+def _norm_camp_key(name: str) -> str:
+    """Normalize ชื่อค่าย เพื่อให้เทียบชื่อได้แม่นขึ้น"""
+    name = unicodedata.normalize("NFKC", _plain_camp_name_for_price(name or ""))
+    return re.sub(r"\s+", "", name).casefold()
+
+
+def _get_worker_price_for_peh_item(source_key: str, item_name: str) -> str:
+    """
+    ดึงราคาช่างของรายการสกอจากชื่อค่าย
+    ถ้าไม่เคยตั้งราคาช่าง ให้แสดง ----
+    """
+    item_key = _norm_camp_key(item_name)
+
+    history = CAMP_WORKER_PRICE_BY_SOURCE.get(source_key, {})
+    for camp_name, price in history.items():
+        if _norm_camp_key(camp_name) == item_key:
+            price = (price or "").strip()
+            return price if price else "----"
+
+    current_camp = CURRENT_CAMP_BY_SOURCE.get(source_key)
+    if current_camp and _norm_camp_key(current_camp) == item_key:
+        price = (CURRENT_CAMP_PRICE_BY_SOURCE.get(source_key) or "").strip()
+        return price if price else "----"
+
+    return "----"
+
+
 def _dedupe_peh_name(existing_items, raw_name: str, max_len: int = 40) -> str:
     base = _base_peh_name(raw_name) or "-"
     max_idx = 0
@@ -287,12 +326,17 @@ def _add_peh_item(event, text):
         name, tail = format_peh_text_anyway(text)
         name = name if name else "-"
 
+        # ดึงราคาช่างของค่ายนี้
+        # ถ้าไม่ได้ตั้งราคาช่าง จะได้ ----
+        worker_price = _get_worker_price_for_peh_item(key, name)
+
         # ถ้าชื่อซ้ำ: ใช้ชื่อที่ได้จากการจัดการ
         deduped_name = _dedupe_peh_name(PEH_LIST[key], name, max_len=40)
 
         PEH_LIST[key].append({
-            "name": deduped_name,  # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
-            "tail": tail[:6]
+            "name": deduped_name,
+            "worker_price": worker_price,
+            "tail": (tail or "")[:6]
         })
 
         # 🔥 HARD LIMIT 100 รายการ
@@ -307,6 +351,7 @@ def _add_peh_item(event, text):
     except Exception as e:
         print(f"Error while adding peh item: {e}")
         return None
+
 
 
 
@@ -579,13 +624,12 @@ def flex_account_v2():
 
 def flex_peh_list_pages(title, items, page_size=30):
     MAX_PAGES = 5
-    PAGE_SIZE = 30
-    MAX_ITEMS = MAX_PAGES * PAGE_SIZE  # = 150
+    PAGE_SIZE = page_size or 30
+    MAX_ITEMS = MAX_PAGES * PAGE_SIZE  # = 150 เมื่อ page_size = 30
 
     items = items[:MAX_ITEMS]
     bubbles = []
     total_pages = (len(items) + PAGE_SIZE - 1) // PAGE_SIZE
-
 
     passed, failed, draw = count_result_from_items(items)
     summary_text = f"✅ ผ่าน {passed}   ❌ แพ้ {failed}   ⛔ จาว {draw}"
@@ -621,7 +665,6 @@ def flex_peh_list_pages(title, items, page_size=30):
                 "color": "#334155",
                 "margin": "sm"
             },
-            # 🔽 เพิ่มตรงนี้ 🔽
             {
                 "type": "text",
                 "text": "👉 เลื่อนขวาเพื่อดูรายการเพิ่มเติม",
@@ -638,49 +681,60 @@ def flex_peh_list_pages(title, items, page_size=30):
         ]
 
         # =========
-        # LIST
+        # LIST: ชื่อ / ราคาช่างกลาง / ผลด้านขวา
         # =========
         for i, item in enumerate(page_items, start=start + 1):
+            worker_price = (item.get("worker_price") or "----").strip() or "----"
+            tail_text = (item.get("tail") or "").strip()
+
             contents.append({
                 "type": "box",
                 "layout": "horizontal",
                 "alignItems": "center",
+                "spacing": "none",
                 "contents": [
-                    # ลำดับ
                     {
                         "type": "text",
                         "text": f"{i}.",
                         "size": "sm",
                         "color": "#475569",
                         "weight": "bold",
+                        "width": "28px",
                         "flex": 0
                     },
-
-                    # ชื่อ
                     {
                         "type": "text",
-                        "text": item["name"],
+                        "text": item.get("name", "-"),
                         "size": "sm",
                         "color": "#111827",
-                        "wrap": True,
+                        "wrap": False,
+                        "maxLines": 1,
                         "flex": 1,
                         "margin": "sm"
                     },
-
-                    # ราคา + ผล (ชิดขวา)
                     {
                         "type": "text",
-                        "text": item["tail"] or "",
+                        "text": worker_price,
+                        "size": "sm",
+                        "weight": "bold",
+                        "color": "#334155",
+                        "align": "center",
+                        "width": "88px",
+                        "flex": 0
+                    },
+                    {
+                        "type": "text",
+                        "text": tail_text,
                         "size": "sm",
                         "weight": "bold",
                         "color": "#0F172A",
                         "align": "end",
+                        "width": "82px",
                         "flex": 0
                     }
                 ]
             })
 
-            # เส้นคั่นบางมาก
             contents.append({
                 "type": "separator",
                 "margin": "none",
@@ -693,7 +747,7 @@ def flex_peh_list_pages(title, items, page_size=30):
             "body": {
                 "type": "box",
                 "layout": "vertical",
-                "paddingAll": "12px",  # เท่าเดิม
+                "paddingAll": "12px",
                 "backgroundColor": "#FFFFFF",
                 "contents": contents
             }
@@ -1703,8 +1757,13 @@ def handle_text_message(event):
 
         key = _source_key(event)
         CURRENT_CAMP_BY_SOURCE[key] = camp_name
-        # เปิดค่ายใหม่ ให้ล้างราคาช่างเดิม เพื่อไม่ให้ราคาของค่ายเก่าติดมาด้วย
+
+        # เปิดค่ายใหม่ ให้ล้างราคาช่างล่าสุดก่อน
         CURRENT_CAMP_PRICE_BY_SOURCE.pop(key, None)
+
+        # บันทึกไว้ก่อนว่า ค่ายนี้ยังไม่ได้ตั้งราคาช่าง
+        # เวลาเอาไปลงสกอจะขึ้น ----
+        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = "----"
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1734,6 +1793,9 @@ def handle_text_message(event):
 
         CURRENT_CAMP_PRICE_BY_SOURCE[key] = worker_price
 
+        # เก็บราคาช่างผูกกับชื่อค่ายล่าสุด
+        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = worker_price
+
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=format_open_camp_text(camp_name, worker_price))
@@ -1751,6 +1813,10 @@ def handle_text_message(event):
                 TextSendMessage(text="⚠️ ยังไม่มีชื่อค่ายที่เปิดไว้\nให้พิมพ์ เช่น เปิด แอ๊ดเทวดา ก่อนครับ")
             )
             return
+
+        # ตอนปิด ให้ยืนยันราคาช่างของค่ายนี้อีกครั้ง
+        # ถ้าไม่ได้ตั้งราคา จะคงเป็น ----
+        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = worker_price or "----"
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1817,6 +1883,9 @@ def handle_text_message(event):
     if user_text.lower() == "ล้างรายการ" and is_admin:
         key = _source_key(event)
         PEH_LIST[key] = []
+        CURRENT_CAMP_BY_SOURCE.pop(key, None)
+        CURRENT_CAMP_PRICE_BY_SOURCE.pop(key, None)
+        CAMP_WORKER_PRICE_BY_SOURCE.pop(key, None)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ล้างรายการเรียบร้อย"))
         return
 
