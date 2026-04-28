@@ -299,7 +299,9 @@ def _add_peh_item(event, text):
 
         # ✅ ราคาช่างล่าสุดที่แอดมินแจ้ง เช่น "ราคาช่าง 320-360"
         # รายการสกอที่เพิ่มหลังจากนี้ จะจำราคาช่างชุดนี้ไว้กับรายการนั้นทันที
-        worker_price = (CURRENT_CAMP_PRICE_BY_SOURCE.get(key) or "").strip()
+        # ดึงราคาช่างล่าสุด ณ เวลาที่เพิ่มรายการเท่านั้น
+        # ถ้ายังไม่เคยตั้ง "ราคาช่าง ..." ให้เป็นค่าว่าง เพื่อไม่ให้แสดงราคาในรายการนั้น
+        worker_price = str(CURRENT_CAMP_PRICE_BY_SOURCE.get(key) or "").strip()
 
         # ถ้าชื่อซ้ำ: ใช้ชื่อที่ได้จากการจัดการ
         deduped_name = _dedupe_peh_name(PEH_LIST[key], name, max_len=40)
@@ -587,6 +589,21 @@ def flex_account_v2():
         }
     }
 
+def _item_worker_price(item: dict) -> str:
+    """คืนค่าราคาช่างที่ถูกบันทึกไว้กับรายการนั้นเท่านั้น
+
+    สำคัญ:
+    - ถ้ารายการถูกเพิ่มตอนที่ยังไม่ได้พิมพ์คำสั่ง "ราคาช่าง ..."
+      ช่องกลางต้องว่าง ไม่ดึงราคาล่าสุดมาแสดงย้อนหลัง
+    - ถ้ารายการถูกเพิ่มหลังพิมพ์ "ราคาช่าง 320-360"
+      รายการนั้นจะจำ 320-360 ไว้
+    - ถ้าราคาช่างถูกเปลี่ยนภายหลัง รายการเก่าจะไม่เปลี่ยนตาม
+    """
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("worker_price") or "").strip()
+
+
 def flex_peh_list_pages(title, items, page_size=30):
     MAX_PAGES = 5
     PAGE_SIZE = 30
@@ -689,7 +706,7 @@ def flex_peh_list_pages(title, items, page_size=30):
                     # ตรงกลาง: ราคาช่าง เช่น 320-360
                     {
                         "type": "text",
-                        "text": item.get("worker_price", "") or "",
+                        "text": _item_worker_price(item),
                         "size": "xs",
                         "color": "#0F172A",
                         "align": "center",
