@@ -287,11 +287,16 @@ def _add_peh_item(event, text):
         name, tail = format_peh_text_anyway(text)
         name = name if name else "-"
 
+        # ✅ ราคาช่างล่าสุดที่แอดมินแจ้ง เช่น "ราคาช่าง 320-360"
+        # รายการสกอที่เพิ่มหลังจากนี้ จะจำราคาช่างชุดนี้ไว้กับรายการนั้นทันที
+        worker_price = (CURRENT_CAMP_PRICE_BY_SOURCE.get(key) or "").strip()
+
         # ถ้าชื่อซ้ำ: ใช้ชื่อที่ได้จากการจัดการ
         deduped_name = _dedupe_peh_name(PEH_LIST[key], name, max_len=40)
 
         PEH_LIST[key].append({
-            "name": deduped_name,  # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
+            "name": deduped_name,          # ใช้ชื่อที่ผ่านการกันซ้ำแล้ว
+            "worker_price": worker_price, # ราคาช่างที่ใช้กับรายการนี้
             "tail": tail[:6]
         })
 
@@ -663,19 +668,32 @@ def flex_peh_list_pages(title, items, page_size=30):
                         "size": "sm",
                         "color": "#111827",
                         "wrap": True,
-                        "flex": 1,
+                        "flex": 6,
+                        "margin": "sm"
+                    },
+
+                    # ราคาช่างล่าสุดที่ถูกบันทึกไว้กับรายการนี้ (แสดงกลางแถว)
+                    {
+                        "type": "text",
+                        "text": item.get("worker_price", "") or "",
+                        "size": "sm",
+                        "color": "#0F172A",
+                        "align": "center",
+                        "maxLines": 1,
+                        "flex": 4,
                         "margin": "sm"
                     },
 
                     # ราคา + ผล (ชิดขวา)
                     {
                         "type": "text",
-                        "text": item["tail"] or "",
+                        "text": item.get("tail", "") or "",
                         "size": "sm",
                         "weight": "bold",
                         "color": "#0F172A",
                         "align": "end",
-                        "flex": 0
+                        "maxLines": 1,
+                        "flex": 3
                     }
                 ]
             })
