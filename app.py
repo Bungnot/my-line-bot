@@ -687,50 +687,86 @@ def flex_peh_list_pages(title, items, page_size=30):
             worker_price = (item.get("worker_price") or "----").strip() or "----"
             tail_text = (item.get("tail") or "").strip()
 
+            # แก้ระยะห่างคอลัมน์ให้ราคาช่างอยู่กลาง และผลด้านขวาไม่ติดกัน
+            # หมายเหตุ: LINE Flex ไม่รองรับ width บน text ทุกกรณี จึงครอบด้วย box ที่กำหนด width แทน
             contents.append({
                 "type": "box",
                 "layout": "horizontal",
                 "alignItems": "center",
-                "spacing": "none",
+                "spacing": "sm",
+                "paddingTop": "4px",
+                "paddingBottom": "4px",
                 "contents": [
                     {
-                        "type": "text",
-                        "text": f"{i}.",
-                        "size": "sm",
-                        "color": "#475569",
-                        "weight": "bold",
-                        "width": "28px",
-                        "flex": 0
-                    },
-                    {
-                        "type": "text",
-                        "text": item.get("name", "-"),
-                        "size": "sm",
-                        "color": "#111827",
-                        "wrap": False,
-                        "maxLines": 1,
+                        "type": "box",
+                        "layout": "horizontal",
+                        "alignItems": "center",
                         "flex": 1,
-                        "margin": "sm"
+                        "contents": [
+                            {
+                                "type": "box",
+                                "layout": "vertical",
+                                "width": "28px",
+                                "flex": 0,
+                                "contents": [
+                                    {
+                                        "type": "text",
+                                        "text": f"{i}.",
+                                        "size": "sm",
+                                        "color": "#475569",
+                                        "weight": "bold"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "text",
+                                "text": item.get("name", "-"),
+                                "size": "sm",
+                                "color": "#111827",
+                                "wrap": False,
+                                "maxLines": 1,
+                                "flex": 1,
+                                "margin": "sm"
+                            }
+                        ]
                     },
                     {
-                        "type": "text",
-                        "text": worker_price,
-                        "size": "sm",
-                        "weight": "bold",
-                        "color": "#334155",
-                        "align": "center",
-                        "width": "88px",
-                        "flex": 0
+                        "type": "box",
+                        "layout": "vertical",
+                        "width": "96px",
+                        "flex": 0,
+                        "alignItems": "center",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": worker_price,
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#334155",
+                                "align": "center",
+                                "wrap": False,
+                                "maxLines": 1
+                            }
+                        ]
                     },
                     {
-                        "type": "text",
-                        "text": tail_text,
-                        "size": "sm",
-                        "weight": "bold",
-                        "color": "#0F172A",
-                        "align": "end",
-                        "width": "82px",
-                        "flex": 0
+                        "type": "box",
+                        "layout": "vertical",
+                        "width": "96px",
+                        "flex": 0,
+                        "alignItems": "flex-end",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": tail_text,
+                                "size": "sm",
+                                "weight": "bold",
+                                "color": "#0F172A",
+                                "align": "end",
+                                "wrap": False,
+                                "maxLines": 1
+                            }
+                        ]
                     }
                 ]
             })
