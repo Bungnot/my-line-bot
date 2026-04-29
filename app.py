@@ -257,35 +257,112 @@ def _plain_camp_name_for_price(name: str) -> str:
     ทำชื่อค่ายให้เป็นชื่อฐานสำหรับเทียบราคาช่าง
     - ตัดท้าย (1), (2) ที่ระบบกันชื่อซ้ำเติมให้
     - ตัดวงเล็บคำอธิบายท้ายชื่อ เช่น โก๋แก่(ไม่มี) -> โก๋แก่
+    - ตัดช่องว่าง/อักขระแฝงที่ LINE อาจส่งมาปน
     """
-    name = _base_peh_name(name or "")
+    name = unicodedata.normalize("NFKC", str(name or ""))
+    name = name.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    name = _base_peh_name(name)
     name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
     return name
 
 
 def _norm_camp_key(name: str) -> str:
-    """Normalize ชื่อค่าย เพื่อให้เทียบชื่อได้แม่นขึ้น"""
+    """Normalize ชื่อค่ายให้เทียบกันได้แม้มีเว้นวรรค จุด ขีด วงเล็บ หรือ emoji ปน"""
     name = unicodedata.normalize("NFKC", _plain_camp_name_for_price(name or ""))
-    return re.sub(r"\s+", "", name).casefold()
+    chars = []
+    for ch in name.casefold():
+        cat = unicodedata.category(ch)
+        # เก็บตัวอักษร ตัวเลข และวรรณยุกต์/สระประกอบ; ตัดช่องว่าง เครื่องหมาย และ emoji
+        if cat[0] in {"L", "N", "M"}:
+            chars.append(ch)
+    return "".join(chars)
+
+
+def _clean_worker_price(worker_price: str) -> str:
+    """ทำราคาช่างให้สะอาดก่อนเก็บ/แสดงผล"""
+    worker_price = unicodedata.normalize("NFKC", str(worker_price or ""))
+    worker_price = worker_price.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    return re.sub(r"\s+", " ", worker_price).strip()
+
+
+def _names_match_for_worker_price(a: str, b: str) -> bool:
+    """เทียบชื่อค่ายแบบยืดหยุ่น แต่ยังกันเคสค่าว่าง"""
+    ka = _norm_camp_key(a)
+    kb = _norm_camp_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+
+    # รองรับเคสชื่อมีคำขยายต่อท้าย เช่น ชื่อค่าย + หมายเหตุ/วงเล็บ/สัญลักษณ์
+    short, long = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    return len(short) >= 3 and (long.startswith(short) or long.endswith(short))
+
+
+def _remember_worker_price(source_key: str, camp_name: str, worker_price: str):
+    """เก็บราคาช่างทั้งแบบชื่อจริง และแบบ key ที่ normalize แล้ว เพื่อลดโอกาสหาไม่เจอ"""
+    worker_price = _clean_worker_price(worker_price)
+    camp_name = _plain_camp_name_for_price(camp_name)
+    if not source_key or not camp_name:
+        return
+
+    history = CAMP_WORKER_PRICE_BY_SOURCE.setdefault(source_key, {})
+    history[camp_name] = worker_price or "----"
+
+    norm_key = _norm_camp_key(camp_name)
+    if norm_key:
+        history[f"__norm__:{norm_key}"] = worker_price or "----"
+
+
+def _update_existing_peh_worker_prices(source_key: str, camp_name: str, worker_price: str):
+    """ถ้าตั้ง/แก้ราคาช่างหลังจากมีรายการแล้ว ให้เติมราคาย้อนหลังให้รายการค่ายเดียวกัน"""
+    worker_price = _clean_worker_price(worker_price)
+    if not worker_price:
+        return
+
+    for item in PEH_LIST.get(source_key, []):
+        item_name = item.get("name", "")
+        if _names_match_for_worker_price(item_name, camp_name):
+            item["worker_price"] = worker_price
 
 
 def _get_worker_price_for_peh_item(source_key: str, item_name: str) -> str:
     """
     ดึงราคาช่างของรายการสกอจากชื่อค่าย
-    ถ้าไม่เคยตั้งราคาช่าง ให้แสดง ----
+    ถ้าเทียบชื่อไม่เจอ ให้ใช้ราคาช่างล่าสุดของค่ายที่กำลังเปิดอยู่เป็น fallback
+    เพื่อกันอาการบางครั้งขึ้น ---- ทั้งที่แอดมินแจ้งราคาช่างแล้ว
     """
     item_key = _norm_camp_key(item_name)
 
     history = CAMP_WORKER_PRICE_BY_SOURCE.get(source_key, {})
-    for camp_name, price in history.items():
-        if _norm_camp_key(camp_name) == item_key:
-            price = (price or "").strip()
-            return price if price else "----"
 
+    # 1) หาแบบ key ที่ normalize แล้วก่อน แม่นสุดและไม่แพ้ช่องว่าง/เครื่องหมาย
+    if item_key:
+        price = _clean_worker_price(history.get(f"__norm__:{item_key}", ""))
+        if price and price != "----":
+            return price
+
+    # 2) หาแบบเทียบชื่อยืดหยุ่นจาก history
+    for camp_name, price in history.items():
+        if str(camp_name).startswith("__norm__:"):
+            continue
+        if _names_match_for_worker_price(camp_name, item_name):
+            price = _clean_worker_price(price)
+            if price and price != "----":
+                return price
+
+    # 3) เทียบกับค่ายที่กำลังเปิดอยู่
     current_camp = CURRENT_CAMP_BY_SOURCE.get(source_key)
-    if current_camp and _norm_camp_key(current_camp) == item_key:
-        price = (CURRENT_CAMP_PRICE_BY_SOURCE.get(source_key) or "").strip()
+    if current_camp and _names_match_for_worker_price(current_camp, item_name):
+        price = _clean_worker_price(CURRENT_CAMP_PRICE_BY_SOURCE.get(source_key, ""))
         return price if price else "----"
+
+    # 4) fallback สำคัญ: ถ้ากำลังเปิดค่ายและแจ้งราคาช่างแล้ว ให้ใช้ราคาล่าสุดเลย
+    # ช่วยแก้เคสชื่อในคำสั่ง เปะ ไม่ตรงกับชื่อในคำสั่ง เปิด แบบ 100%
+    latest_price = _clean_worker_price(CURRENT_CAMP_PRICE_BY_SOURCE.get(source_key, ""))
+    if latest_price:
+        return latest_price
 
     return "----"
 
@@ -1913,7 +1990,7 @@ def handle_text_message(event):
 
         # บันทึกไว้ก่อนว่า ค่ายนี้ยังไม่ได้ตั้งราคาช่าง
         # เวลาเอาไปลงสกอจะขึ้น ----
-        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = "----"
+        _remember_worker_price(key, camp_name, "----")
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1933,7 +2010,7 @@ def handle_text_message(event):
             )
             return
 
-        worker_price = re.sub(r"\s+", " ", m_worker_price.group(1).strip())
+        worker_price = _clean_worker_price(m_worker_price.group(1))
         if not worker_price:
             line_bot_api.reply_message(
                 event.reply_token,
@@ -1944,7 +2021,8 @@ def handle_text_message(event):
         CURRENT_CAMP_PRICE_BY_SOURCE[key] = worker_price
 
         # เก็บราคาช่างผูกกับชื่อค่ายล่าสุด
-        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = worker_price
+        _remember_worker_price(key, camp_name, worker_price)
+        _update_existing_peh_worker_prices(key, camp_name, worker_price)
 
         line_bot_api.reply_message(
             event.reply_token,
@@ -1966,7 +2044,7 @@ def handle_text_message(event):
 
         # ตอนปิด ให้ยืนยันราคาช่างของค่ายนี้อีกครั้ง
         # ถ้าไม่ได้ตั้งราคา จะคงเป็น ----
-        CAMP_WORKER_PRICE_BY_SOURCE.setdefault(key, {})[camp_name] = worker_price or "----"
+        _remember_worker_price(key, camp_name, worker_price or "----")
 
         line_bot_api.reply_message(
             event.reply_token,
