@@ -34,7 +34,7 @@ ADMIN_UIDS = {
     "U2f156aa5effee7c1ee349b9320a35381",  "Ua914df11d1747d2eea4fbdd06a9c1052",
     "Uf425373fafd5fddfc3a3a87a091d1cbe",  "U12c10eb2c9180da67129f881acb3d82c",
     "Uabd44b316349c4ae7c5709fcc2ac69d6",  "U511f830f04b19951a74a76e509f92ff6",
-    "U89d67e6aa4111e16ec048074957bd23b",
+    "U89d67e6aa4111e16ec048074957bd23b", "U58f3952f08fada769c5174bb0f6f0a15",
 }
 TARGET_GROUP_NAME = "🚀บั้งไฟแสน • เถ้าแก่น้อย •"
 
