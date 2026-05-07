@@ -34,12 +34,18 @@ ADMIN_UIDS = {
     "U2f156aa5effee7c1ee349b9320a35381",  "Ua914df11d1747d2eea4fbdd06a9c1052",
     "Uf425373fafd5fddfc3a3a87a091d1cbe",  "U12c10eb2c9180da67129f881acb3d82c",
     "Uabd44b316349c4ae7c5709fcc2ac69d6",  "U511f830f04b19951a74a76e509f92ff6",
+    "U89d67e6aa4111e16ec048074957bd23b",
 }
 TARGET_GROUP_NAME = "🚀บั้งไฟแสน • เถ้าแก่น้อย •"
 
 # --- B.1 Auto insufficient-credit trigger ---
 AUTO_INSUFFICIENT_CREDIT_UIDS = {"ADMINXXXXXXXXXX"}
-AUTO_INSUFFICIENT_CREDIT_KEYWORDS = {"ติด", "ต", "ตต", "จ"}
+AUTO_INSUFFICIENT_CREDIT_KEYWORDS = {
+    "ติด", "ต", "ตต", "จ",
+    "ยกเลิกเกินเครดิต", "เกินเครดิต", "ยกเลิก",
+    "เครดิต", "เครดิตไม่พอ", "เครดิตไม่เพียงพอ", "เครดิตหมด",
+    "ไม่มียอด", "ยอดไม่พอ", "ยอดหมด"
+}
 
 # --- C. File Paths & Locks ---
 MEDIA_DIR = os.path.join(os.path.dirname(__file__), "media")
@@ -164,6 +170,74 @@ def _display_name(event):
     except Exception:
         name = None
     return name or f"user:{uid[:6]}…" if uid else "ลูกค้า"
+
+
+def _normalize_command_text(value: str) -> str:
+    """Normalize ข้อความคำสั่งจาก LINE ให้เทียบคีย์เวิร์ดได้แม้มีช่องว่าง/อักขระแฝง"""
+    value = unicodedata.normalize("NFKC", str(value or ""))
+    value = value.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
+    value = re.sub(r"\s+", " ", value).strip().casefold()
+    return value
+
+
+def _compact_command_text(value: str) -> str:
+    """ยุบช่องว่างและสัญลักษณ์คั่นคำ เพื่อให้ 'เครดิต ไม่ พอ' เท่ากับ 'เครดิตไม่พอ'"""
+    value = _normalize_command_text(value)
+    return re.sub(r"[\s\-_/|:：,.;!！?？()\[\]{}'\"`]+", "", value)
+
+
+def _is_insufficient_credit_command(user_text: str) -> bool:
+    """
+    จับคำสั่งแจ้งเครดิตไม่พอแบบยืดหยุ่น
+    ตัวอย่างที่รองรับ:
+    - ยกเลิกเกินเครดิต
+    - เกินเครดิต
+    - ยกเลิก
+    - เครดิต / เครดิตไม่พอ / เครดิตไม่เพียงพอ / เครดิตหมด
+    - ไม่มียอด / ยอดไม่พอ / ยอดหมด
+    - ใช้ร่วมกับ @ชื่อ หรือการ reply ข้อความสมาชิกได้
+    """
+    compact = _compact_command_text(user_text)
+    if not compact:
+        return False
+
+    exact_commands = {
+        "ยกเลิกเกินเครดิต", "เกินเครดิต", "ยกเลิก",
+        "เครดิต", "เครดิตไม่พอ", "เครดิตไม่เพียงพอ", "เครดิตหมด",
+        "ไม่มียอด", "ยอดไม่พอ", "ยอดหมด"
+    }
+
+    # ตัดส่วน @ชื่อ ออกเพื่อรองรับ เช่น "เกินเครดิต @แดง" หรือ "ยกเลิก @แดง"
+    command_part = compact.split("@", 1)[0]
+    if compact in exact_commands or command_part in exact_commands:
+        return True
+
+    strong_keywords = (
+        "ยกเลิกเกินเครดิต", "เกินเครดิต", "เครดิตไม่พอ", "เครดิตไม่เพียงพอ",
+        "เครดิตหมด", "ไม่มียอด", "ยอดไม่พอ", "ยอดหมด"
+    )
+    if any(keyword in compact for keyword in strong_keywords):
+        return True
+
+    # คำที่เกี่ยวกับเครดิต + สถานะปัญหา ให้ถือว่าเป็นคำสั่งนี้
+    if "เครดิต" in compact and any(term in compact for term in ("ยกเลิก", "เกิน", "ไม่พอ", "ไม่เพียงพอ", "หมด", "ไม่มียอด", "ยอดไม่พอ")):
+        return True
+
+    return False
+
+
+def _extract_insufficient_credit_target_name(event, user_text: str, fallback_name: str = None) -> str:
+    """หาเป้าหมายจาก @ชื่อ ก่อน ถ้าไม่มีให้ใช้ชื่อคนที่ถูก reply ถ้าไม่มีอีกจึงใช้ชื่อผู้ส่ง"""
+    m_name = re.search(r"@([^\s@]+)", user_text or "")
+    if m_name:
+        return m_name.group(1).strip()
+
+    quoted_id = getattr(getattr(event, "message", None), "quotedMessageId", None)
+    quoted = _cache_get(quoted_id) if quoted_id else None
+    if quoted and quoted.get("name"):
+        return quoted.get("name")
+
+    return fallback_name or "ลูกค้า"
 
 # ==============================================================================
 def _push_to_source(event_source, message):
@@ -1949,9 +2023,12 @@ def handle_text_message(event):
         threading.Thread(target=_save_user_to_txt, args=(user_id, sender_name)).start()
 
     # --- 0. Auto insufficient-credit trigger for specific UID ---
-    normalized_trigger_text = re.sub(r"[\s\-]+", "", user_text)
-    if user_id in AUTO_INSUFFICIENT_CREDIT_UIDS and normalized_trigger_text in AUTO_INSUFFICIENT_CREDIT_KEYWORDS:
-        target_name = sender_name or "ลูกค้า"
+    normalized_trigger_text = _compact_command_text(user_text)
+    if user_id in AUTO_INSUFFICIENT_CREDIT_UIDS and (
+        normalized_trigger_text in AUTO_INSUFFICIENT_CREDIT_KEYWORDS
+        or _is_insufficient_credit_command(user_text)
+    ):
+        target_name = _extract_insufficient_credit_target_name(event, user_text, sender_name)
         bubble = flex_insufficient_credit(target_name)
         line_bot_api.reply_message(
             event.reply_token,
@@ -2313,20 +2390,17 @@ def handle_text_message(event):
         )
         return
 
-    # 1.9. ตรวจสอบการแจ้งเครดิตเกิน (จากรูปแบบในรูปภาพ)
-    # ค้นหาคำว่า "เกินเครดิต @" ตามด้วยชื่อ
-    # 1.9. ตรวจสอบการแจ้งเครดิตเกิน (รองรับคำว่า เกินเครดิต หรือ เครดิตไม่พอ)
-    if is_admin and ("เกินเครดิต" in user_text or "เครดิตไม่พอ" in user_text):
-        # ใช้ Regex ค้นหาชื่อที่ตามหลัง @
-        m_name = re.search(r"@(\S+)", user_text)
-        if m_name:
-            target_name = m_name.group(1).strip()
-            bubble = flex_insufficient_credit(target_name)
-            line_bot_api.reply_message(
-                event.reply_token,
-                FlexSendMessage(alt_text=f"⚠️ เครดิตไม่พอ: {target_name}", contents=bubble)
-            )
-            return
+    # 1.9. ตรวจสอบการแจ้งเครดิตเกิน / เครดิตไม่พอ แบบยืดหยุ่น
+    # รองรับ: ยกเลิกเกินเครดิต, เกินเครดิต, ยกเลิก, เครดิต, เครดิตไม่พอ, ไม่มียอด ฯลฯ
+    # ใช้ได้ทั้งแบบพิมพ์ @ชื่อ หรือ reply ข้อความของสมาชิก
+    if is_admin and _is_insufficient_credit_command(user_text):
+        target_name = _extract_insufficient_credit_target_name(event, user_text, sender_name)
+        bubble = flex_insufficient_credit(target_name)
+        line_bot_api.reply_message(
+            event.reply_token,
+            FlexSendMessage(alt_text=f"⚠️ เครดิตไม่พอ: {target_name}", contents=bubble)
+        )
+        return
         
     # --- 2. Public Commands (Always Available) ---
 
